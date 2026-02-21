@@ -105,6 +105,6 @@ EcpInstaller.App/bin/Release/net8.0-windows/win-x64/publish/EcpInstaller.exe
 
 ## 8) Примечания по эксплуатационному окружению
 
-- Текущая версия ориентирована на Windows 10 x64.
+- Текущая версия ориентирована на Windows 10/11 x64.
 - Для сценариев с контейнерами CryptoPro нужна предустановленная инфраструктура CryptoPro CSP.
 - Лог-файл создаётся рядом с исполняемым файлом: `EcpInstaller.log`.
