@@ -109,7 +109,7 @@ public sealed class ScanService
 
         if (!candidate.IsInstallable)
         {
-            candidate.SkipReason = "Пропущено: нет приватного ключа";
+            candidate.SkipReason = "Пропущено: нет ключа";
             logger.Warn($"CER без контейнера — будет пропущен: {file}");
         }
         else

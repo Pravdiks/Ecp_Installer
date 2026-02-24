@@ -116,10 +116,12 @@ public sealed class InstallService
     private async Task<(int ExitCode, string Output)> RunCertMgrInstallAsync(
         string certMgr, string cerPath, string contUncPath, string password, string locationArg, int provType)
     {
-        var args = $@"-inst -store {locationArg} -file ""{cerPath}"" -cont ""{contUncPath}"" -provtype {provType} -pin ""{password}""";
+        // -pin is optional: only supply it when the container is password-protected.
+        var pinArg = !string.IsNullOrEmpty(password) ? $@" -pin ""{password}""" : string.Empty;
+        var pinArgForLog = !string.IsNullOrEmpty(password) ? @" -pin ""***""" : string.Empty;
 
-        // Log the command (mask the PIN to avoid leaking passwords into logs).
-        var argsForLog = $@"-inst -store {locationArg} -file ""{cerPath}"" -cont ""{contUncPath}"" -provtype {provType} -pin ""***""";
+        var args = $@"-inst -store {locationArg} -file ""{cerPath}"" -cont ""{contUncPath}"" -provtype {provType}{pinArg} -silent";
+        var argsForLog = $@"-inst -store {locationArg} -file ""{cerPath}"" -cont ""{contUncPath}"" -provtype {provType}{pinArgForLog} -silent";
         _logger.Info($"Запуск certmgr: {certMgr} {argsForLog}");
 
         var result = await _cryptoProCli.RunAsync(certMgr, args);
