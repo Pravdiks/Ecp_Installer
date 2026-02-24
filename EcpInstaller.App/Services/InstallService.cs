@@ -82,55 +82,119 @@ public sealed class InstallService
             throw new InvalidOperationException("Для CER не найден контейнер закрытого ключа рядом с сертификатом.");
         }
 
-        var targetContainer = await PlaceContainerAsync(task.ContainerPath!, containerLocation, containerFolder);
-        var cert = new X509Certificate2(task.CertificatePath);
+        // Place container and get the CryptoPro UNC path (\\.\ prefix required by CryptoPro CSP).
+        var contUncPath = await PlaceContainerAsync(task.ContainerPath!, containerLocation, containerFolder);
 
         var locationArg = storeLocation == StoreLocation.CurrentUser ? "uMy" : "mMy";
-        var args = $@"-inst -store {locationArg} -file ""{task.CertificatePath}"" -cont ""{targetContainer}"" -pin ""{password}""";
-        var result = await _cryptoProCli.RunAsync(certMgr, args);
 
-        if (result.ExitCode != 0)
+        // Try GOST-2012 (provtype 80) first; fall back to GOST-2001 (provtype 75) for older keys.
+        var (exitCode, output) = await RunCertMgrInstallAsync(certMgr, task.CertificatePath, contUncPath, password, locationArg, provType: 80);
+
+        if (exitCode != 0)
         {
-            throw new InvalidOperationException($"CryptoPro certmgr завершился с кодом {result.ExitCode}. {result.Output}");
+            _logger.Warn($"certmgr -provtype 80 завершился с кодом {exitCode}. Повтор с -provtype 75 (ГОСТ-2001)...");
+            (exitCode, output) = await RunCertMgrInstallAsync(certMgr, task.CertificatePath, contUncPath, password, locationArg, provType: 75);
         }
 
-        _logger.Info($"CryptoPro сертификат установлен: {task.CertificatePath}, контейнер: {targetContainer}");
+        if (exitCode != 0)
+        {
+            throw new InvalidOperationException($"certmgr завершился с кодом {exitCode}.\n{output}");
+        }
 
+        _logger.Info($"CryptoPro сертификат установлен: {task.CertificatePath}");
+        _logger.Info($"  Контейнер UNC: {contUncPath}");
+
+        var cert = new X509Certificate2(task.CertificatePath);
         using var store = new X509Store(StoreName.My, storeLocation);
         store.Open(OpenFlags.ReadWrite);
         RemoveOldCertificatesExcept(store, cert);
     }
 
+    /// <summary>
+    /// Builds and runs the certmgr -inst command, logging the full command line and output.
+    /// </summary>
+    private async Task<(int ExitCode, string Output)> RunCertMgrInstallAsync(
+        string certMgr, string cerPath, string contUncPath, string password, string locationArg, int provType)
+    {
+        var args = $@"-inst -store {locationArg} -file ""{cerPath}"" -cont ""{contUncPath}"" -provtype {provType} -pin ""{password}""";
+
+        // Log the command (mask the PIN to avoid leaking passwords into logs).
+        var argsForLog = $@"-inst -store {locationArg} -file ""{cerPath}"" -cont ""{contUncPath}"" -provtype {provType} -pin ""***""";
+        _logger.Info($"Запуск certmgr: {certMgr} {argsForLog}");
+
+        var result = await _cryptoProCli.RunAsync(certMgr, args);
+        _logger.Info($"certmgr завершился с кодом {result.ExitCode}. Вывод:\n{result.Output}");
+        return result;
+    }
+
+    /// <summary>
+    /// Copies the container to its target location and returns the CryptoPro UNC path.
+    /// <list type="bullet">
+    ///   <item>Disk mode  → copies to <paramref name="containerFolder"/>,
+    ///         returns <c>\\.\{full path to copied folder}</c></item>
+    ///   <item>Registry mode → copies to <c>%APPDATA%\Crypto Pro\Keys\{name}\</c>,
+    ///         returns <c>\\.\REGISTRY\{name}</c></item>
+    /// </list>
+    /// </summary>
     private async Task<string> PlaceContainerAsync(string sourceContainer, ContainerLocation containerLocation, string containerFolder)
     {
+        var containerName = Path.GetFileName(
+            sourceContainer.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+
         if (containerLocation == ContainerLocation.Registry)
         {
-            _logger.Info("Выбрано хранение контейнера в реестре CurrentUser.");
-            return sourceContainer;
+            // CryptoPro registry provider reads user containers from %APPDATA%\Crypto Pro\Keys\{name}\
+            var keysRoot = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "Crypto Pro", "Keys");
+            var destination = Path.Combine(keysRoot, containerName);
+
+            _logger.Info($"Режим реестра: копирование контейнера в {destination}");
+            Directory.CreateDirectory(keysRoot);
+
+            if (Directory.Exists(destination))
+            {
+                Directory.Delete(destination, true);
+            }
+
+            await Task.Run(() => CopyDirectory(sourceContainer, destination));
+            _logger.Info($"Контейнер скопирован: {destination}");
+
+            // UNC path for registry-stored containers.
+            var regUncPath = $@"\\.\REGISTRY\{containerName}";
+            _logger.Info($"UNC-путь контейнера (реестр): {regUncPath}");
+            return regUncPath;
         }
 
+        // Disk mode: copy to the user-specified folder.
         Directory.CreateDirectory(containerFolder);
-        var destination = Path.Combine(containerFolder, Path.GetFileName(sourceContainer));
+        var diskDestination = Path.Combine(containerFolder, containerName);
 
         var sourceFullPath = Path.GetFullPath(sourceContainer)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var destinationFullPath = Path.GetFullPath(destination)
+        var destinationFullPath = Path.GetFullPath(diskDestination)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
-        if (string.Equals(sourceFullPath, destinationFullPath, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(sourceFullPath, destinationFullPath, StringComparison.OrdinalIgnoreCase))
+        {
+            if (Directory.Exists(diskDestination))
+            {
+                Directory.Delete(diskDestination, true);
+            }
+
+            await Task.Run(() => CopyDirectory(sourceContainer, diskDestination));
+            _logger.Info($"Контейнер скопирован на диск: {diskDestination}");
+        }
+        else
         {
             _logger.Info($"Контейнер уже находится в целевой папке: {destinationFullPath}");
-            return sourceContainer;
         }
 
-        if (Directory.Exists(destination))
-        {
-            Directory.Delete(destination, true);
-        }
-
-        await Task.Run(() => CopyDirectory(sourceContainer, destination));
-        _logger.Info($"Контейнер скопирован на диск: {destination}");
-        return destination;
+        // CryptoPro requires a UNC path even for disk containers: \\.\{full path}
+        // Example: \\.\D:\EcpInstallerContainers\queriejw.001
+        var diskUncPath = $@"\\.\{destinationFullPath}";
+        _logger.Info($"UNC-путь контейнера (диск): {diskUncPath}");
+        return diskUncPath;
     }
 
     private static void CopyDirectory(string source, string destination)
