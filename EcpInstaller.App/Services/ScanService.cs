@@ -10,6 +10,9 @@ public sealed class ScanService
     private static readonly HashSet<string> PfxExtensions = [".pfx", ".p12"];
     private static readonly HashSet<string> CertExtensions = [".cer", ".crt"];
 
+    // CryptoPro container directory has a numeric 3-digit extension: .000, .001, .002 ...
+    private static readonly Regex ContainerDirPattern = new(@"^\.\d{3}$", RegexOptions.Compiled);
+
     public IReadOnlyCollection<SignatureTask> Scan(IEnumerable<string> inputPaths, AppLogger logger, bool onlyMostActual, string pfxPassword)
     {
         var files = ExpandFiles(inputPaths, logger).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -92,6 +95,8 @@ public sealed class ScanService
     {
         var directory = Path.GetDirectoryName(file) ?? string.Empty;
         var baseName = Path.GetFileNameWithoutExtension(file);
+
+        logger.Info($"Обрабатывается CER: {file}");
         var containerPath = FindContainerCandidate(directory, baseName, logger);
 
         var candidate = new ScanCandidate
@@ -105,6 +110,11 @@ public sealed class ScanService
         if (!candidate.IsInstallable)
         {
             candidate.SkipReason = "Пропущено: нет приватного ключа";
+            logger.Warn($"CER без контейнера — будет пропущен: {file}");
+        }
+        else
+        {
+            logger.Info($"CER связан с контейнером: {file}  →  {containerPath}");
         }
 
         try
@@ -216,6 +226,13 @@ public sealed class ScanService
 
             foreach (var subDirectory in subDirectories)
             {
+                // Skip CryptoPro container folders (*.NNN) — they hold key files, not certificates.
+                // Scanning into them wastes time and never yields .cer files.
+                var dirExt = Path.GetExtension(Path.GetFileName(subDirectory));
+                if (ContainerDirPattern.IsMatch(dirExt))
+                {
+                    continue;
+                }
                 pendingDirectories.Push(subDirectory);
             }
         }
@@ -223,21 +240,41 @@ public sealed class ScanService
 
     private static string? FindContainerCandidate(string directory, string baseName, AppLogger logger)
     {
-        var directFolder = Path.Combine(directory, baseName);
-        if (Directory.Exists(directFolder))
-        {
-            return directFolder;
-        }
-
+        // CryptoPro container is a directory with a 3-digit numeric extension (.000, .001, ...)
+        // and must contain primary.key inside. It always lives in the same directory as the .cer file.
         try
         {
-            var possible = Directory.EnumerateDirectories(directory)
-                .FirstOrDefault(d => Path.GetFileName(d).Contains(baseName, StringComparison.OrdinalIgnoreCase));
-            return possible;
+            var containers = Directory.EnumerateDirectories(directory)
+                .Where(d => ContainerDirPattern.IsMatch(Path.GetExtension(Path.GetFileName(d)))
+                            && File.Exists(Path.Combine(d, "primary.key")))
+                .ToList();
+
+            if (containers.Count == 0)
+            {
+                logger.Warn($"Контейнер закрытого ключа не найден в '{directory}' " +
+                            $"(нет папок *.NNN с файлом primary.key).");
+                return null;
+            }
+
+            if (containers.Count == 1)
+            {
+                logger.Info($"Контейнер найден: {containers[0]}");
+                return containers[0];
+            }
+
+            // Multiple containers in same directory — prefer the one whose stem matches
+            // the .cer filename, otherwise take the one with the lowest index (.000 first).
+            var preferred = containers.FirstOrDefault(d =>
+                Path.GetFileNameWithoutExtension(d)
+                    .Contains(baseName, StringComparison.OrdinalIgnoreCase));
+            var selected = preferred
+                           ?? containers.OrderBy(d => Path.GetExtension(d), StringComparer.Ordinal).First();
+            logger.Info($"Найдено контейнеров: {containers.Count}, выбран: {selected}");
+            return selected;
         }
         catch (Exception ex)
         {
-            logger.Warn($"Не удалось проверить контейнер рядом с '{directory}': {ex.Message}");
+            logger.Warn($"Не удалось проверить контейнеры рядом с '{directory}': {ex.Message}");
             return null;
         }
     }
