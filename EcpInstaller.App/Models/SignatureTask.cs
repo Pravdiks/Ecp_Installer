@@ -24,9 +24,9 @@ public sealed class SignatureTask : INotifyPropertyChanged
             _status = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(StatusLabel));
+            OnPropertyChanged(nameof(GroupKey));
         }
     }
-
 
     public string StatusLabel => Status switch
     {
@@ -38,6 +38,22 @@ public sealed class SignatureTask : INotifyPropertyChanged
         _ => Status.ToString()
     };
 
+    /// <summary>
+    /// Computed group key used by the DataGrid GroupStyle to cluster
+    /// skipped items under collapsible headers.
+    /// </summary>
+    public string GroupKey => Status switch
+    {
+        SignatureTaskStatus.Skipped when Message.Contains("Просрочен", StringComparison.OrdinalIgnoreCase)
+            => "Пропущено (просрочены)",
+        SignatureTaskStatus.Skipped when Message.Contains("нет ключа", StringComparison.OrdinalIgnoreCase)
+            => "Пропущено (нет ключа)",
+        SignatureTaskStatus.Skipped when Message.Contains("актуальный", StringComparison.OrdinalIgnoreCase)
+            => "Пропущено (есть более актуальный)",
+        SignatureTaskStatus.Skipped => "Пропущено",
+        _ => "Задачи на установку"
+    };
+
     public string Message
     {
         get => _message;
@@ -45,6 +61,7 @@ public sealed class SignatureTask : INotifyPropertyChanged
         {
             _message = value;
             OnPropertyChanged();
+            OnPropertyChanged(nameof(GroupKey));
         }
     }
 

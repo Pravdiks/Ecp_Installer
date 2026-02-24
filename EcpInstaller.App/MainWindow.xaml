@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:helpers="clr-namespace:EcpInstaller.App.Helpers"
         mc:Ignorable="d"
         Title="ECP Installer (portable)" Height="780" Width="1120"
         Topmost="True"
@@ -19,6 +20,7 @@
                         CanExecute="PasteCommand_CanExecute" />
     </Window.CommandBindings>
     <Window.Resources>
+        <helpers:GroupExpandedConverter x:Key="GroupExpandedConverter" />
         <Style x:Key="StatusTextStyle" TargetType="TextBlock">
             <Setter Property="Foreground" Value="DimGray" />
             <Style.Triggers>
@@ -114,6 +116,34 @@
         </Grid>
 
         <DataGrid Grid.Row="3" ItemsSource="{Binding Tasks}" AutoGenerateColumns="False" IsReadOnly="True" Margin="0,0,0,8">
+            <DataGrid.GroupStyle>
+                <GroupStyle>
+                    <GroupStyle.ContainerStyle>
+                        <Style TargetType="{x:Type GroupItem}">
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="{x:Type GroupItem}">
+                                        <Expander IsExpanded="{Binding Name,
+                                                    Converter={StaticResource GroupExpandedConverter},
+                                                    Mode=OneTime}"
+                                                  BorderThickness="0" Margin="0,2,0,0">
+                                            <Expander.Header>
+                                                <TextBlock FontWeight="SemiBold" Foreground="DarkOrange" Margin="4,2">
+                                                    <Run Text="{Binding Name, Mode=OneWay}"/>
+                                                    <Run Text=": "/>
+                                                    <Run Text="{Binding ItemCount, Mode=OneWay}"/>
+                                                    <Run Text=" записей"/>
+                                                </TextBlock>
+                                            </Expander.Header>
+                                            <ItemsPresenter />
+                                        </Expander>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </GroupStyle.ContainerStyle>
+                </GroupStyle>
+            </DataGrid.GroupStyle>
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Название" Binding="{Binding DisplayName}" Width="2*" />
                 <DataGridTextColumn Header="Тип" Binding="{Binding Kind}" Width="*" />

@@ -9,6 +9,7 @@ using System.Runtime.CompilerServices;
 using System.Security.Cryptography.X509Certificates;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 
@@ -91,6 +92,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             Tasks.Add(task);
         }
 
+        // Apply grouping so that skipped items are clustered under collapsible headers.
+        var view = CollectionViewSource.GetDefaultView(Tasks);
+        view.GroupDescriptions.Clear();
+        view.GroupDescriptions.Add(new PropertyGroupDescription(nameof(SignatureTask.GroupKey)));
+
         if (Tasks.Count == 0)
         {
             _logger.Warn("Поддерживаемые ЭЦП не найдены. Мусорные файлы (PDF/DOCX/JPG/PNG/MP4 и т.д.) проигнорированы.");
@@ -127,8 +133,33 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
         }
 
-        var password = PasswordBox.Text;
         var containerLocation = RegistryOption.IsChecked == true ? ContainerLocation.Registry : ContainerLocation.Disk;
+
+        // Disk (HDIMAGE) mode requires admin to register the reader in HKLM.
+        if (containerLocation == ContainerLocation.Disk && !Helpers.WindowsPrincipalHelper.IsAdministrator())
+        {
+            var switchResult = System.Windows.MessageBox.Show(
+                "Режим 'Диск' требует прав администратора для регистрации считывателя HDIMAGE.\n\n" +
+                "Переключиться на режим 'Реестр (CurrentUser)'? Он не требует админ-прав.",
+                "Требуются права администратора",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Warning);
+
+            if (switchResult == MessageBoxResult.Yes)
+            {
+                RegistryOption.IsChecked = true;
+                containerLocation = ContainerLocation.Registry;
+                _logger.Warn("Автопереключение на режим Реестр — нет прав администратора.");
+            }
+            else if (switchResult == MessageBoxResult.Cancel)
+            {
+                _logger.Warn("Установка отменена пользователем.");
+                return;
+            }
+            // No = try anyway (reader might already be registered).
+        }
+
+        var password = PasswordBox.Text;
         var containerFolder = ContainerFolderBox.Text;
 
         Progress.Value = 0;
