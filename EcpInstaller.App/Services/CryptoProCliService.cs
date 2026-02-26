@@ -1,7 +1,13 @@
-using Microsoft.Win32;
+using System;
+using System.IO;
+using System.Linq;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
+using Microsoft.Win32;
 
 namespace EcpInstaller.App.Services;
 
@@ -58,6 +64,7 @@ public sealed class CryptoProCliService
             RedirectStandardError = true,
             WorkingDirectory = Path.GetDirectoryName(exe) ?? Environment.CurrentDirectory,
         };
+
         psi.EnvironmentVariables["CRYPT_SUPPRESS_MODAL"] = "1";
         psi.EnvironmentVariables["CRYPT_SILENT"] = "1";
 
@@ -95,10 +102,12 @@ public sealed class CryptoProCliService
         if (res.ExitCode != 0)
             _logger.Warn($"csptest enum_cont завершился с кодом {res.ExitCode}");
 
-        var lines = res.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var lines = res.Output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        const string pattern = @"\\\\\.\\(HDIMAGE|REGISTRY)\\[^\s""']+";
         var matches = lines
-            .SelectMany(line => Regex.Matches(line, @"\\\\\.\\(HDIMAGE|REGISTRY)\\[^\s\"']+", RegexOptions.IgnoreCase).Cast<Match>())
+            .SelectMany(l => Regex.Matches(l, pattern, RegexOptions.IgnoreCase).Cast<Match>())
             .Select(m => m.Value)
+            .Where(v => !string.IsNullOrWhiteSpace(v))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -113,6 +122,7 @@ public sealed class CryptoProCliService
         var result = text;
         foreach (var secret in secrets.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct())
             result = result.Replace(secret, "****", StringComparison.Ordinal);
+
         return result;
     }
 
