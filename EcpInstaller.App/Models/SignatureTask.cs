@@ -26,6 +26,7 @@ public sealed class SignatureTask : INotifyPropertyChanged
             OnPropertyChanged();
             OnPropertyChanged(nameof(StatusLabel));
             OnPropertyChanged(nameof(GroupKey));
+            OnPropertyChanged(nameof(GroupSortOrder));
         }
     }
 
@@ -55,11 +56,12 @@ public sealed class SignatureTask : INotifyPropertyChanged
     };
 
     /// <summary>
-    /// Computed group key used by the DataGrid GroupStyle to cluster
-    /// skipped items under collapsible headers.
+    /// Computed group key for the DataGrid GroupStyle.
+    /// Errors get their own group; skipped items are split by reason.
     /// </summary>
     public string GroupKey => Status switch
     {
+        SignatureTaskStatus.Error => "Ошибка установки",
         SignatureTaskStatus.Skipped when Message.Contains("Просрочен", StringComparison.OrdinalIgnoreCase)
             => "Пропущено (просрочены)",
         SignatureTaskStatus.Skipped when Message.Contains("нет ключа", StringComparison.OrdinalIgnoreCase)
@@ -70,6 +72,20 @@ public sealed class SignatureTask : INotifyPropertyChanged
         _ => "Задачи на установку"
     };
 
+    /// <summary>
+    /// Numeric sort key so groups appear in the right order:
+    /// 1 = install tasks, 2 = errors, 3–6 = skipped sub-groups.
+    /// </summary>
+    public int GroupSortOrder => Status switch
+    {
+        SignatureTaskStatus.Error => 2,
+        SignatureTaskStatus.Skipped when Message.Contains("Просрочен", StringComparison.OrdinalIgnoreCase)   => 3,
+        SignatureTaskStatus.Skipped when Message.Contains("актуальный", StringComparison.OrdinalIgnoreCase) => 4,
+        SignatureTaskStatus.Skipped when Message.Contains("нет ключа", StringComparison.OrdinalIgnoreCase)  => 5,
+        SignatureTaskStatus.Skipped => 6,
+        _ => 1
+    };
+
     public string Message
     {
         get => _message;
@@ -78,6 +94,7 @@ public sealed class SignatureTask : INotifyPropertyChanged
             _message = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(GroupKey));
+            OnPropertyChanged(nameof(GroupSortOrder));
         }
     }
 

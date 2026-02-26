@@ -66,6 +66,9 @@ public sealed class CryptoProCli
             // Run from the CryptoPro directory so it can find its own DLLs.
             WorkingDirectory = Path.GetDirectoryName(exe) ?? string.Empty
         };
+        // Suppress CryptoPro's interactive PIN dialogs when -pin / -password is provided.
+        psi.EnvironmentVariables["CRYPT_SUPPRESS_MODAL"] = "1";
+        psi.EnvironmentVariables["CRYPT_SILENT"]         = "1";
 
         using var process = Process.Start(psi)
             ?? throw new InvalidOperationException("Не удалось запустить CryptoPro CLI");
