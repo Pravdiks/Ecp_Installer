@@ -3,7 +3,6 @@ using EcpInstaller.App.Models;
 using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography.X509Certificates;
-using System.Text;
 
 namespace EcpInstaller.App.Services;
 
@@ -97,107 +96,169 @@ public sealed class InstallService
         var cspVer = _cryptoProCli.ResolveCspVersion();
         _logger.Info($"CryptoPro CSP версия: {(cspVer > 0 ? cspVer.ToString() : "не определена")}");
 
-        var certMgrDir  = Path.GetDirectoryName(certMgr)!;
-        var locationArg = storeLocation == StoreLocation.CurrentUser ? "uMy" : "mMy";
+        var locationArg     = storeLocation == StoreLocation.CurrentUser ? "uMy" : "mMy";
         var sourceContainer = task.ContainerPath!;
-        var folderName = Path.GetFileName(
-            sourceContainer.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
 
-        // Auto-switch disk mode to registry when the source container lives on a removable
-        // drive (USB / FAT12).  certmgr ignores -pin for FAT12 readers and shows a PIN dialog
-        // instead; the registry approach uses -cont and -pin which are always honoured.
-        if (containerLocation == ContainerLocation.Disk && IsOnRemovableDrive(sourceContainer))
-        {
-            _logger.Warn($"Контейнер на съёмном носителе ({Path.GetPathRoot(sourceContainer)}). " +
-                "Автопереключение на режим Реестр для подавления диалога пароля КриптоПро.");
-            containerLocation = ContainerLocation.Registry;
-        }
+        // ═══════════════════════════════════════════════════════════
+        // ШАГ 1: ВСЕГДА копируем контейнер в РЕЕСТР КриптоПро.
+        // Только \\.\REGISTRY\... принимает -pin без GUI диалога.
+        // HDIMAGE и FAT12 считыватели полностью игнорируют -pin.
+        // ═══════════════════════════════════════════════════════════
+        var contUncPath = await CopyContainerToRegistryAsync(sourceContainer);
 
-        int lastExitCode = -1;
-        string? lastOutput = null;
-
+        // ═══════════════════════════════════════════════════════════
+        // ШАГ 2: Режим "Диск" — дополнительно копируем контейнер
+        // в указанную папку (для хранения). Не критично для установки
+        // — certmgr всё равно использует реестровую копию.
+        // ═══════════════════════════════════════════════════════════
         if (containerLocation == ContainerLocation.Disk)
         {
-            // ── Disk mode: no HDIMAGE registration, no admin rights needed.
-            // Copy container to destination folder; place .cer next to it; run certmgr without -cont.
-            _logger.Info("Режим Диск: копирование в папку назначения + certmgr без -cont.");
-
-            foreach (var provType in ProvTypes)
-            {
-                (lastExitCode, lastOutput) = await RunCertMgrDiskModeAsync(
-                    certMgr, task.CertificatePath, sourceContainer, folderName,
-                    containerFolder, password, locationArg, provType);
-                if (lastExitCode == 0) break;
-                _logger.Warn($"Диск, certmgr -provtype {provType} завершился с кодом {lastExitCode}.");
-            }
-
-            if (lastExitCode != 0)
-                throw new InvalidOperationException(
-                    $"certmgr (режим Диск) завершился с кодом {lastExitCode}.\n{lastOutput}");
-        }
-        else
-        {
-            // ── Registry mode ───────────────────────────────────────────────────────────────
-            // Strategy 1: read logical name from name.key, copy to %APPDATA%\Crypto Pro\Keys\,
-            //             run certmgr with -cont "\\.\REGISTRY\{logicalName}".
-            // Strategy 2 (fallback): temp folder, no -cont.
-
-            _logger.Info("Стратегия 1: установка с -cont (имя из name.key).");
-            var strategy1Ok = false;
-
             try
             {
-                var contUncPath = await PlaceContainerToRegistryAsync(sourceContainer, folderName);
+                var actualFolder = EnsureContainerFolder(containerFolder);
+                var diskDest = Path.Combine(actualFolder,
+                    Path.GetFileName(sourceContainer.TrimEnd(
+                        Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
 
-                // Pre-cache the container password via csptest so certmgr never shows a PIN dialog.
-                await CacheContainerPasswordAsync(certMgrDir, contUncPath, password);
+                var srcFull = Path.GetFullPath(sourceContainer)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var dstFull = Path.GetFullPath(diskDest)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
-                foreach (var provType in ProvTypes)
+                if (!string.Equals(srcFull, dstFull, StringComparison.OrdinalIgnoreCase))
                 {
-                    (lastExitCode, lastOutput) = await RunCertMgrInstallAsync(
-                        certMgr, task.CertificatePath, contUncPath, password, locationArg, provType);
-                    if (lastExitCode == 0) break;
-                    _logger.Warn($"Стратегия 1, certmgr -provtype {provType} завершился с кодом {lastExitCode}.");
+                    Directory.CreateDirectory(diskDest);
+                    await Task.Run(() => CopyContainerFiles(sourceContainer, diskDest));
+                    _logger.Info($"Контейнер скопирован на диск: {diskDest}");
                 }
-                strategy1Ok = lastExitCode == 0;
-                if (strategy1Ok)
-                    _logger.Info($"Стратегия 1 успешна. UNC: {contUncPath}");
                 else
-                    _logger.Warn($"Стратегия 1 не удалась (код {lastExitCode}). Переход к стратегии 2.");
+                {
+                    _logger.Info($"Контейнер уже в целевой папке: {srcFull}");
+                }
             }
             catch (Exception ex)
             {
-                _logger.Warn($"Стратегия 1 исключение: {ex.Message}. Переход к стратегии 2.");
-            }
-
-            if (!strategy1Ok)
-            {
-                _logger.Info("Стратегия 2: установка без -cont (temp-папка, авто-обнаружение).");
-                foreach (var provType in ProvTypes)
-                {
-                    (lastExitCode, lastOutput) = await RunCertMgrWithTempFolderAsync(
-                        certMgr, task.CertificatePath, sourceContainer, folderName,
-                        password, locationArg, provType);
-                    if (lastExitCode == 0) break;
-                    _logger.Warn($"Стратегия 2, certmgr -provtype {provType} завершился с кодом {lastExitCode}.");
-                }
-
-                if (lastExitCode != 0)
-                    throw new InvalidOperationException(
-                        $"Обе стратегии установки не удались. Последний код: {lastExitCode}.\n{lastOutput}");
-
-                _logger.Info("Стратегия 2 успешна (temp-папка).");
+                _logger.Warn($"Не удалось скопировать контейнер на диск: {ex.Message}. Установка через реестр продолжится.");
             }
         }
 
+        // ═══════════════════════════════════════════════════════════
+        // ШАГ 3: Пауза — КриптоПро иногда не успевает "увидеть"
+        // только что скопированный реестровый контейнер.
+        // ═══════════════════════════════════════════════════════════
+        await Task.Delay(1000);
+
+        // ═══════════════════════════════════════════════════════════
+        // ШАГ 4: certmgr с реестровым UNC-путём. -pin гарантированно
+        // принимается без GUI диалога для \\.\REGISTRY\...
+        // ═══════════════════════════════════════════════════════════
+        int lastExitCode = -1;
+        string? lastOutput = null;
+
+        foreach (var provType in ProvTypes)
+        {
+            (lastExitCode, lastOutput) = await RunCertMgrInstallAsync(
+                certMgr, task.CertificatePath, contUncPath, password, locationArg, provType);
+            if (lastExitCode == 0) break;
+            _logger.Warn($"certmgr -provtype {provType} завершился с кодом {lastExitCode}.");
+        }
+
+        if (lastExitCode != 0)
+            throw new InvalidOperationException(
+                $"certmgr завершился с кодом {lastExitCode}.\n{lastOutput}");
+
         _logger.Info($"CryptoPro сертификат установлен: {task.CertificatePath}");
+        _logger.Info($"UNC контейнера: {contUncPath}");
 
         using var store = new X509Store(StoreName.My, storeLocation);
         store.Open(OpenFlags.ReadWrite);
         RemoveOldCertificatesExcept(store, new X509Certificate2(task.CertificatePath));
 
-        // ── Verify private key binding; attempt certutil -repairstore if missing ──
+        // ═══════════════════════════════════════════════════════════
+        // ШАГ 5: Проверка привязки закрытого ключа + repairstore
+        // ═══════════════════════════════════════════════════════════
         await VerifyAndRepairPrivateKeyAsync(task, storeLocation);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Registry container placement
+    // ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Copies the container folder to <c>%APPDATA%\Crypto Pro\Keys\{name}\</c>
+    /// where <c>{name}</c> is the raw folder name with its numeric extension stripped
+    /// (e.g. <c>rwowmbby.001</c> → <c>rwowmbby</c>).
+    /// Recreates the destination to ensure a clean copy.
+    /// Returns <c>\\.\REGISTRY\{name}</c>.
+    /// </summary>
+    private async Task<string> CopyContainerToRegistryAsync(string sourceContainerPath)
+    {
+        var keysRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Crypto Pro", "Keys");
+        Directory.CreateDirectory(keysRoot);
+
+        var rawName = Path.GetFileName(
+            sourceContainerPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+
+        // Strip .NNN numeric extension (e.g. "rwowmbby.001" → "rwowmbby").
+        // Only strip when the extension consists entirely of digits.
+        var ext     = Path.GetExtension(rawName);
+        var regName = ext.Length > 1 && ext[1..].All(char.IsDigit)
+            ? Path.GetFileNameWithoutExtension(rawName)
+            : rawName;
+
+        var destFolder = Path.Combine(keysRoot, regName);
+
+        // Recreate destination to ensure a clean copy — avoids stale files from a previous run.
+        if (Directory.Exists(destFolder))
+            Directory.Delete(destFolder, recursive: true);
+        Directory.CreateDirectory(destFolder);
+
+        await Task.Run(() => CopyContainerFiles(sourceContainerPath, destFolder));
+
+        var uncPath = $@"\\.\REGISTRY\{regName}";
+        _logger.Info($"Контейнер скопирован в реестр: {destFolder}. UNC: {uncPath}");
+        return uncPath;
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Container folder helpers (disk mode)
+    // ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Creates <paramref name="requestedFolder"/> and returns it.
+    /// Falls back to <c>%APPDATA%\EcpInstaller\Containers</c> if the drive
+    /// is unavailable or the directory cannot be created.
+    /// </summary>
+    private string EnsureContainerFolder(string requestedFolder)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(requestedFolder);
+            if (!string.IsNullOrEmpty(root) && !Directory.Exists(root))
+            {
+                _logger.Warn($"Диск {root} недоступен.");
+                return FallbackContainerFolder();
+            }
+            Directory.CreateDirectory(requestedFolder);
+            return requestedFolder;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"Ошибка создания папки '{requestedFolder}': {ex.Message}");
+            return FallbackContainerFolder();
+        }
+    }
+
+    private string FallbackContainerFolder()
+    {
+        var fallback = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "EcpInstaller", "Containers");
+        Directory.CreateDirectory(fallback);
+        _logger.Warn($"Используется fallback-папка для контейнеров: {fallback}");
+        return fallback;
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -263,7 +324,7 @@ public sealed class InstallService
     }
 
     // ──────────────────────────────────────────────────────────────
-    //  certmgr invocations
+    //  certmgr invocation
     // ──────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -285,204 +346,6 @@ public sealed class InstallService
         return result;
     }
 
-    /// <summary>
-    /// Disk mode: copies the container to <paramref name="destContainerFolder"/>,
-    /// places the <c>.cer</c> file next to it (temp copy), then runs
-    /// <c>certmgr -inst</c> <b>without</b> <c>-cont</c> so CryptoPro auto-discovers
-    /// the container. Removes the temporary <c>.cer</c> copy in a <c>finally</c> block;
-    /// the container folder is kept permanently.
-    /// </summary>
-    private async Task<(int ExitCode, string Output)> RunCertMgrDiskModeAsync(
-        string certMgr, string cerPath, string sourceContainer, string containerFolderName,
-        string destContainerFolder, string password, string locationArg, int provType)
-    {
-        Directory.CreateDirectory(destContainerFolder);
-        var destContainerDir = Path.Combine(destContainerFolder, containerFolderName);
-
-        var srcFull = Path.GetFullPath(sourceContainer)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var dstFull = Path.GetFullPath(destContainerDir)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-        if (!string.Equals(srcFull, dstFull, StringComparison.OrdinalIgnoreCase))
-        {
-            Directory.CreateDirectory(destContainerDir);
-            await Task.Run(() => CopyContainerFiles(sourceContainer, destContainerDir));
-            _logger.Info($"Контейнер скопирован на диск: {destContainerDir}");
-        }
-        else
-        {
-            _logger.Info($"Контейнер уже в целевой папке: {dstFull}");
-        }
-
-        // Place .cer next to the container folder so CryptoPro can find both
-        var tempCerPath = Path.Combine(destContainerFolder, Path.GetFileName(cerPath));
-        File.Copy(cerPath, tempCerPath, overwrite: true);
-        _logger.Info($"Режим Диск: .cer скопирован рядом с контейнером: {tempCerPath}");
-
-        try
-        {
-            var pinArg    = !string.IsNullOrEmpty(password) ? $@" -pin ""{password}""" : string.Empty;
-            var pinForLog = !string.IsNullOrEmpty(password) ? @" -pin ""***"""         : string.Empty;
-
-            // No -cont: CryptoPro auto-discovers the container in the same directory as the .cer
-            var args   = $@"-inst -store {locationArg} -file ""{tempCerPath}"" -provtype {provType}{pinArg} -silent";
-            var forLog = $@"-inst -store {locationArg} -file ""{tempCerPath}"" -provtype {provType}{pinForLog} -silent";
-            _logger.Info($"Запуск (Диск, без -cont): {certMgr} {forLog}");
-
-            var result = await _cryptoProCli.RunAsync(certMgr, args);
-            _logger.Info($"certmgr код {result.ExitCode}. Вывод:\n{result.Output}");
-            return result;
-        }
-        finally
-        {
-            try { File.Delete(tempCerPath); }
-            catch (Exception ex) { _logger.Warn($"Не удалось удалить temp .cer {tempCerPath}: {ex.Message}"); }
-        }
-    }
-
-    /// <summary>
-    /// Strategy 2 fallback (registry mode): copies the <c>.cer</c> + container into a
-    /// temp directory and runs <c>certmgr -inst</c> <b>without</b> <c>-cont</c>.
-    /// CryptoPro auto-discovers the container from the same directory as the certificate.
-    /// The temp directory is deleted in a <c>finally</c> block.
-    /// </summary>
-    private async Task<(int ExitCode, string Output)> RunCertMgrWithTempFolderAsync(
-        string certMgr, string cerPath, string sourceContainer, string containerFolderName,
-        string password, string locationArg, int provType)
-    {
-        var tempDir = Path.Combine(Path.GetTempPath(), $"EcpInstall_{Guid.NewGuid():N}");
-        try
-        {
-            Directory.CreateDirectory(tempDir);
-
-            var tempCerPath = Path.Combine(tempDir, Path.GetFileName(cerPath));
-            File.Copy(cerPath, tempCerPath, overwrite: true);
-
-            var tempContainerDir = Path.Combine(tempDir, containerFolderName);
-            Directory.CreateDirectory(tempContainerDir);
-            CopyContainerFiles(sourceContainer, tempContainerDir);
-
-            _logger.Info($"Стратегия 2: temp-папка {tempDir}");
-
-            var pinArg    = !string.IsNullOrEmpty(password) ? $@" -pin ""{password}""" : string.Empty;
-            var pinForLog = !string.IsNullOrEmpty(password) ? @" -pin ""***"""         : string.Empty;
-
-            var args   = $@"-inst -store {locationArg} -file ""{tempCerPath}"" -provtype {provType}{pinArg} -silent";
-            var forLog = $@"-inst -store {locationArg} -file ""{tempCerPath}"" -provtype {provType}{pinForLog} -silent";
-            _logger.Info($"Запуск (без -cont): {certMgr} {forLog}");
-
-            var result = await _cryptoProCli.RunAsync(certMgr, args);
-            _logger.Info($"certmgr код {result.ExitCode}. Вывод:\n{result.Output}");
-            return result;
-        }
-        finally
-        {
-            try { Directory.Delete(tempDir, recursive: true); }
-            catch (Exception ex) { _logger.Warn($"Не удалось удалить temp-папку {tempDir}: {ex.Message}"); }
-        }
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    //  Container name from name.key
-    // ──────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Reads the logical container name from <c>name.key</c> inside
-    /// <paramref name="containerFolder"/>. Tries UTF-16LE (CryptoPro 5) first,
-    /// then CP1251 (CryptoPro 4 / older). Falls back to the folder name without
-    /// extension if decoding fails.
-    /// </summary>
-    private string ReadContainerName(string containerFolder)
-    {
-        var nameKeyPath = Path.Combine(containerFolder, "name.key");
-        if (!File.Exists(nameKeyPath))
-        {
-            var fallback = FolderBaseName(containerFolder);
-            _logger.Warn($"name.key не найден в {containerFolder}, используется имя папки: {fallback}");
-            return fallback;
-        }
-
-        var bytes = File.ReadAllBytes(nameKeyPath);
-
-        var nameUtf16 = TryDecodeContainerName(bytes, Encoding.Unicode);
-        if (nameUtf16 is not null)
-        {
-            _logger.Info($"Имя контейнера из name.key (UTF-16LE): {nameUtf16}");
-            return nameUtf16;
-        }
-
-        try
-        {
-            var cp1251 = Encoding.GetEncoding(1251);
-            var nameCp1251 = TryDecodeContainerName(bytes, cp1251);
-            if (nameCp1251 is not null)
-            {
-                _logger.Info($"Имя контейнера из name.key (CP1251): {nameCp1251}");
-                return nameCp1251;
-            }
-        }
-        catch (NotSupportedException) { }
-
-        var fallbackName = FolderBaseName(containerFolder);
-        _logger.Warn($"Не удалось декодировать name.key ({bytes.Length} байт), используется имя папки: {fallbackName}");
-        return fallbackName;
-    }
-
-    private static string? TryDecodeContainerName(byte[] bytes, Encoding encoding)
-    {
-        try
-        {
-            var raw = encoding.GetString(bytes);
-            var segments = raw.Split('\0', StringSplitOptions.RemoveEmptyEntries);
-            foreach (var seg in segments)
-            {
-                var trimmed = seg.Trim().Trim('\uFEFF', '\uFFFD');
-                if (trimmed.Length >= 3 && trimmed.All(c => !char.IsControl(c) && c != '\uFFFD'))
-                    return trimmed;
-            }
-            return null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static string FolderBaseName(string folderPath) =>
-        Path.GetFileNameWithoutExtension(
-            folderPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-
-    // ──────────────────────────────────────────────────────────────
-    //  Registry container placement
-    // ──────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Reads the logical container name from <c>name.key</c>,
-    /// copies key files to <c>%APPDATA%\Crypto Pro\Keys\{logicalName}\</c>,
-    /// and returns <c>\\.\REGISTRY\{logicalName}</c>.
-    /// The UNC path never contains the <c>.NNN</c> extension.
-    /// </summary>
-    private async Task<string> PlaceContainerToRegistryAsync(string sourceContainer, string containerName)
-    {
-        var logicalName = ReadContainerName(sourceContainer);
-        _logger.Info($"Логическое имя контейнера: '{logicalName}' (папка: '{containerName}')");
-
-        var keysRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "Crypto Pro", "Keys");
-        var destination = Path.Combine(keysRoot, logicalName);
-
-        _logger.Info($"Режим реестра: копирование контейнера в {destination}");
-        Directory.CreateDirectory(destination);
-        await Task.Run(() => CopyContainerFiles(sourceContainer, destination));
-        _logger.Info($"Контейнер скопирован: {destination}");
-
-        var uncPath = $@"\\.\REGISTRY\{logicalName}";
-        _logger.Info($"UNC-путь контейнера: {uncPath}");
-        return uncPath;
-    }
-
     // ──────────────────────────────────────────────────────────────
     //  File and process helpers
     // ──────────────────────────────────────────────────────────────
@@ -493,50 +356,6 @@ public sealed class InstallService
         Directory.CreateDirectory(destDir);
         foreach (var file in Directory.EnumerateFiles(sourceDir))
             File.Copy(file, Path.Combine(destDir, Path.GetFileName(file)), overwrite: true);
-    }
-
-    /// <summary>
-    /// Pre-caches the container password via <c>csptest.exe</c> so that CryptoPro's
-    /// interactive PIN dialog is suppressed when certmgr subsequently opens the container.
-    /// Errors are logged but never propagated — certmgr will attempt auth on its own.
-    /// </summary>
-    private async Task CacheContainerPasswordAsync(string certMgrDirectory, string contPath, string password)
-    {
-        if (string.IsNullOrEmpty(password)) return;
-
-        var cspTestPath = Path.Combine(certMgrDirectory, "csptest.exe");
-        if (!File.Exists(cspTestPath))
-        {
-            _logger.Warn("csptest.exe не найден, пропускаем кэширование пароля.");
-            return;
-        }
-
-        var args   = $@"-keyset -cont ""{contPath}"" -password ""{password}"" -check";
-        var forLog = $@"-keyset -cont ""{contPath}"" -password ""***"" -check";
-        _logger.Info($"Кэширование пароля: csptest {forLog}");
-
-        var (exitCode, output) = await RunSystemCommandAsync(cspTestPath, args);
-        _logger.Info($"csptest exitCode={exitCode}. Вывод:\n{output}");
-        // Non-zero is normal if the container is new — certmgr handles it with -pin.
-    }
-
-    /// <summary>
-    /// Returns <c>true</c> if <paramref name="path"/> resides on a removable drive
-    /// (USB / FAT12 flash drive).  Used to auto-switch disk mode to registry mode so
-    /// that certmgr's <c>-pin</c> argument is honoured instead of showing a PIN dialog.
-    /// </summary>
-    private static bool IsOnRemovableDrive(string path)
-    {
-        try
-        {
-            var root = Path.GetPathRoot(path);
-            if (string.IsNullOrEmpty(root)) return false;
-            return new DriveInfo(root).DriveType == DriveType.Removable;
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     /// <summary>Runs an arbitrary system executable (e.g. certutil.exe) and captures stdout + stderr.</summary>
