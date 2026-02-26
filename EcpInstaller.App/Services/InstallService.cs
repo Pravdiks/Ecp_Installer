@@ -97,10 +97,21 @@ public sealed class InstallService
         var cspVer = _cryptoProCli.ResolveCspVersion();
         _logger.Info($"CryptoPro CSP версия: {(cspVer > 0 ? cspVer.ToString() : "не определена")}");
 
+        var certMgrDir  = Path.GetDirectoryName(certMgr)!;
         var locationArg = storeLocation == StoreLocation.CurrentUser ? "uMy" : "mMy";
         var sourceContainer = task.ContainerPath!;
         var folderName = Path.GetFileName(
             sourceContainer.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+
+        // Auto-switch disk mode to registry when the source container lives on a removable
+        // drive (USB / FAT12).  certmgr ignores -pin for FAT12 readers and shows a PIN dialog
+        // instead; the registry approach uses -cont and -pin which are always honoured.
+        if (containerLocation == ContainerLocation.Disk && IsOnRemovableDrive(sourceContainer))
+        {
+            _logger.Warn($"Контейнер на съёмном носителе ({Path.GetPathRoot(sourceContainer)}). " +
+                "Автопереключение на режим Реестр для подавления диалога пароля КриптоПро.");
+            containerLocation = ContainerLocation.Registry;
+        }
 
         int lastExitCode = -1;
         string? lastOutput = null;
@@ -137,6 +148,10 @@ public sealed class InstallService
             try
             {
                 var contUncPath = await PlaceContainerToRegistryAsync(sourceContainer, folderName);
+
+                // Pre-cache the container password via csptest so certmgr never shows a PIN dialog.
+                await CacheContainerPasswordAsync(certMgrDir, contUncPath, password);
+
                 foreach (var provType in ProvTypes)
                 {
                     (lastExitCode, lastOutput) = await RunCertMgrInstallAsync(
@@ -478,6 +493,50 @@ public sealed class InstallService
         Directory.CreateDirectory(destDir);
         foreach (var file in Directory.EnumerateFiles(sourceDir))
             File.Copy(file, Path.Combine(destDir, Path.GetFileName(file)), overwrite: true);
+    }
+
+    /// <summary>
+    /// Pre-caches the container password via <c>csptest.exe</c> so that CryptoPro's
+    /// interactive PIN dialog is suppressed when certmgr subsequently opens the container.
+    /// Errors are logged but never propagated — certmgr will attempt auth on its own.
+    /// </summary>
+    private async Task CacheContainerPasswordAsync(string certMgrDirectory, string contPath, string password)
+    {
+        if (string.IsNullOrEmpty(password)) return;
+
+        var cspTestPath = Path.Combine(certMgrDirectory, "csptest.exe");
+        if (!File.Exists(cspTestPath))
+        {
+            _logger.Warn("csptest.exe не найден, пропускаем кэширование пароля.");
+            return;
+        }
+
+        var args   = $@"-keyset -cont ""{contPath}"" -password ""{password}"" -check";
+        var forLog = $@"-keyset -cont ""{contPath}"" -password ""***"" -check";
+        _logger.Info($"Кэширование пароля: csptest {forLog}");
+
+        var (exitCode, output) = await RunSystemCommandAsync(cspTestPath, args);
+        _logger.Info($"csptest exitCode={exitCode}. Вывод:\n{output}");
+        // Non-zero is normal if the container is new — certmgr handles it with -pin.
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> if <paramref name="path"/> resides on a removable drive
+    /// (USB / FAT12 flash drive).  Used to auto-switch disk mode to registry mode so
+    /// that certmgr's <c>-pin</c> argument is honoured instead of showing a PIN dialog.
+    /// </summary>
+    private static bool IsOnRemovableDrive(string path)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(path);
+            if (string.IsNullOrEmpty(root)) return false;
+            return new DriveInfo(root).DriveType == DriveType.Removable;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>Runs an arbitrary system executable (e.g. certutil.exe) and captures stdout + stderr.</summary>

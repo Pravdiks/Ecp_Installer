@@ -92,10 +92,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             Tasks.Add(task);
         }
 
-        // Apply grouping so that skipped items are clustered under collapsible headers.
+        // Apply grouping and ordering: install tasks first, errors second, skipped last.
         var view = CollectionViewSource.GetDefaultView(Tasks);
         view.GroupDescriptions.Clear();
         view.GroupDescriptions.Add(new PropertyGroupDescription(nameof(SignatureTask.GroupKey)));
+        view.SortDescriptions.Clear();
+        view.SortDescriptions.Add(new SortDescription(nameof(SignatureTask.GroupSortOrder), ListSortDirection.Ascending));
 
         if (Tasks.Count == 0)
         {
