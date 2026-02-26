@@ -13,9 +13,6 @@ namespace EcpInstaller.App.Services;
 
 public sealed class CryptoProCliService
 {
-    private static readonly Regex ContainerFqcnRegex =
-        new(@"(?:\\\\\.\\)?(?:HDIMAGE|REGISTRY)\\[^\s""']+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
     private readonly AppLogger _logger;
     private string? _installToContArg;
 
@@ -130,6 +127,7 @@ public sealed class CryptoProCliService
 
         var output = picked.Value.Output;
         var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        const string commonPattern = "(?:\\\\\\.\\)?(?:HDIMAGE|REGISTRY)\\[^\\s\"']+";
 
         var shortList = new List<string>();
         var uniqueList = new List<string>();
@@ -139,7 +137,7 @@ public sealed class CryptoProCliService
             var parts = line.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             foreach (var part in parts)
             {
-                foreach (Match match in ContainerFqcnRegex.Matches(part))
+                foreach (Match match in Regex.Matches(part, commonPattern, RegexOptions.IgnoreCase))
                 {
                     var value = NormalizeFqcn(match.Value);
                     if (value.IndexOf("\\HDIMAGE\\HDIMAGE\\", StringComparison.OrdinalIgnoreCase) >= 0
