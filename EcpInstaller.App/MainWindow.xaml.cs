@@ -31,7 +31,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var appDirectory = AppContext.BaseDirectory;
         _logger = new AppLogger(appDirectory);
         _scanService = new ScanService();
-        _installService = new InstallService(_logger, new CryptoProCli());
+        var cryptoCli = new CryptoProCliService(_logger);
+        _installService = new InstallService(_logger, new InstallerService(_logger, cryptoCli));
         _settingsService = new SettingsService();
 
         Tasks = [];
