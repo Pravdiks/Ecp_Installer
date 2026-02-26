@@ -21,6 +21,40 @@
     </Window.CommandBindings>
     <Window.Resources>
         <helpers:GroupExpandedConverter x:Key="GroupExpandedConverter" />
+
+        <Style x:Key="GreenButtonStyle" TargetType="Button">
+            <Setter Property="Background"   Value="#4C9900"/>
+            <Setter Property="Foreground"   Value="White"/>
+            <Setter Property="FontWeight"   Value="Bold"/>
+            <Setter Property="BorderBrush"  Value="#3C7800"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding"      Value="4,2"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="2"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#5AAF00"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#3C7800"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.55"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="StatusTextStyle" TargetType="TextBlock">
             <Setter Property="Foreground" Value="DimGray" />
             <Style.Triggers>
@@ -34,6 +68,11 @@
                 </DataTrigger>
                 <DataTrigger Binding="{Binding Status}" Value="Skipped">
                     <Setter Property="Foreground" Value="DarkOrange" />
+                </DataTrigger>
+                <!-- Warning: installed but private key not linked -->
+                <DataTrigger Binding="{Binding HasPrivateKey}" Value="False">
+                    <Setter Property="Foreground" Value="Goldenrod" />
+                    <Setter Property="FontWeight" Value="Bold" />
                 </DataTrigger>
             </Style.Triggers>
         </Style>
@@ -69,7 +108,8 @@
                 <WrapPanel Margin="0,8,0,0">
                     <Button Content="Выбрать папку/файлы" Width="180" Margin="0,0,8,0" Click="PickInput_Click" />
                     <Button Content="Сканировать" Width="120" Margin="0,0,8,0" Click="Scan_Click" />
-                    <Button Content="Установить всё" Width="120" Margin="0,0,8,0" Click="InstallAll_Click" />
+                    <Button Content="Установить всё" Width="120" Margin="0,0,8,0" Click="InstallAll_Click"
+                            Style="{StaticResource GreenButtonStyle}" />
                     <Button Content="Очистить список" Width="140" Margin="0,0,8,0" Click="Clear_Click" />
                     <Button Content="Открыть лог" Width="120" Margin="0,0,8,0" Click="OpenLog_Click" />
                     <Button Content="Сертификаты" Width="120" Margin="0,0,8,0" Click="OpenCertificates_Click" />
@@ -145,16 +185,16 @@
                 </GroupStyle>
             </DataGrid.GroupStyle>
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Название" Binding="{Binding DisplayName}" Width="2*" />
-                <DataGridTextColumn Header="Тип" Binding="{Binding Kind}" Width="*" />
-                <DataGridTextColumn Header="Сертификат" Binding="{Binding CertificatePath}" Width="3*" />
-                <DataGridTextColumn Header="Контейнер" Binding="{Binding ContainerPath}" Width="3*" />
-                <DataGridTextColumn Header="Статус" Binding="{Binding StatusLabel}" Width="*">
+                <DataGridTextColumn Header="Название"    Binding="{Binding DisplayName}"   Width="2*" MinWidth="120" />
+                <DataGridTextColumn Header="Тип"         Binding="{Binding Kind}"          Width="70" MinWidth="55"  />
+                <DataGridTextColumn Header="Сертификат"  Binding="{Binding CertificatePath}" Width="3*" MinWidth="190" />
+                <DataGridTextColumn Header="Контейнер"   Binding="{Binding ContainerPath}" Width="3*" MinWidth="130" />
+                <DataGridTextColumn Header="Статус"      Binding="{Binding StatusLabel}"   Width="130" MinWidth="95">
                     <DataGridTextColumn.ElementStyle>
                         <Style TargetType="TextBlock" BasedOn="{StaticResource StatusTextStyle}" />
                     </DataGridTextColumn.ElementStyle>
                 </DataGridTextColumn>
-                <DataGridTextColumn Header="Сообщение" Binding="{Binding Message}" Width="2*" />
+                <DataGridTextColumn Header="Сообщение"   Binding="{Binding Message}"       Width="2*" MinWidth="220" />
             </DataGrid.Columns>
         </DataGrid>
 
