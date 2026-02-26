@@ -55,8 +55,14 @@ public sealed class ScanService
         if (onlyMostActual)
             ApplyMostActualRule(candidates, logger);
 
-        var tasks = candidates.Select(candidate =>
+        var uniqueMap = new Dictionary<string, SignatureTask>(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidate in candidates)
         {
+            var containerPart = candidate.ContainerPath ?? string.Empty;
+            var key = $"{candidate.CertificatePath}|{containerPart}";
+            if (uniqueMap.ContainsKey(key))
+                continue;
+
             var task = new SignatureTask
             {
                 Kind = candidate.Kind,
@@ -71,8 +77,10 @@ public sealed class ScanService
                 task.Message = candidate.SkipReason;
             }
 
-            return task;
-        }).ToList();
+            uniqueMap[key] = task;
+        }
+
+        var tasks = uniqueMap.Values.ToList();
 
         logger.Info($"Сканирование завершено. Найдено задач: {tasks.Count}.");
         return tasks;

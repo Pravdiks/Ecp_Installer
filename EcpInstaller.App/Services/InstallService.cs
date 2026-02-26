@@ -28,7 +28,7 @@ public sealed class InstallService
                     InstallPfx(task, password, storeLocation);
                     break;
                 case SignatureSourceKind.CryptoProContainer:
-                    await InstallCryptoProAsync(task, password);
+                    await InstallCryptoProAsync(task, password, containerLocation, containerFolder);
                     break;
             }
 
@@ -67,12 +67,12 @@ public sealed class InstallService
         task.HasPrivateKey = cert.HasPrivateKey;
     }
 
-    private async Task InstallCryptoProAsync(SignatureTask task, string password)
+    private async Task InstallCryptoProAsync(SignatureTask task, string password, ContainerLocation containerLocation, string containerFolder)
     {
         if (string.IsNullOrWhiteSpace(task.ContainerPath) || !Directory.Exists(task.ContainerPath))
             throw new InvalidOperationException("Невозможно установить закрытый ключ: CER не содержит private key (контейнер *.000/*.001 не найден).");
 
-        await _installerService.InstallContainerAndBindCertAsync(task.ContainerPath, task.CertificatePath, password);
+        await _installerService.InstallContainerAndBindCertAsync(task.ContainerPath, task.CertificatePath, containerLocation, containerFolder, password);
 
         var thumbprint = GetCertThumbprint(task.CertificatePath);
         task.HasPrivateKey = CheckPrivateKeyLinked(thumbprint);

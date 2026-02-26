@@ -33,8 +33,7 @@ public sealed class CryptoProCliService
         var result = await RunProcessAsync(certmgr, "-?", timeoutMs: 15000, cancellationToken: ct);
         var help = result.Output;
 
-        var candidates = new[] { "-inst-to-cont", "-insttocont", "inst-to-cont", "insttocont" };
-        foreach (var candidate in candidates)
+        foreach (var candidate in new[] { "-inst-to-cont", "-insttocont", "inst-to-cont", "insttocont" })
         {
             if (help.Contains(candidate, StringComparison.OrdinalIgnoreCase))
             {
@@ -64,7 +63,6 @@ public sealed class CryptoProCliService
             RedirectStandardError = true,
             WorkingDirectory = Path.GetDirectoryName(exe) ?? Environment.CurrentDirectory,
         };
-
         psi.EnvironmentVariables["CRYPT_SUPPRESS_MODAL"] = "1";
         psi.EnvironmentVariables["CRYPT_SILENT"] = "1";
 
@@ -95,23 +93,84 @@ public sealed class CryptoProCliService
         return new ProcessResult(process.ExitCode, Mask(output.ToString().Trim(), secretsToMask));
     }
 
-    public async Task<string[]> EnumerateContainerFqcnAsync(CancellationToken ct = default)
+    public async Task<ContainerEnumerationResult> EnumerateContainersFqcnAsync(CancellationToken ct = default)
     {
         var csptest = FindCsptestPath();
-        var res = await RunProcessAsync(csptest, "-keyset -enum_cont -verifyc -fq", cancellationToken: ct);
-        if (res.ExitCode != 0)
-            _logger.Warn($"csptest enum_cont завершился с кодом {res.ExitCode}");
+        var candidateArgs = new[]
+        {
+            "-keyset -enum_cont -verifyc -fqcn",
+            "-keyset -enum_c -verifyc -fqcn",
+            "-keys -enum -verifyc -fqcn -unique"
+        };
 
-        var lines = res.Output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        const string pattern = @"\\\\\.\\(HDIMAGE|REGISTRY)\\[^\s""']+";
-        var matches = lines
-            .SelectMany(l => Regex.Matches(l, pattern, RegexOptions.IgnoreCase).Cast<Match>())
-            .Select(m => m.Value)
-            .Where(v => !string.IsNullOrWhiteSpace(v))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        ProcessResult? picked = null;
+        string usedArgs = candidateArgs[0];
+        foreach (var args in candidateArgs)
+        {
+            var result = await RunProcessAsync(csptest, args, cancellationToken: ct);
+            if (result.ExitCode == 0 && !string.IsNullOrWhiteSpace(result.Output))
+            {
+                picked = result;
+                usedArgs = args;
+                break;
+            }
 
-        return matches;
+            _logger.Warn($"csptest {args} -> code={result.ExitCode}");
+        }
+
+        if (picked is null)
+        {
+            var fallback = await RunProcessAsync(csptest, candidateArgs[0], cancellationToken: ct);
+            picked = fallback;
+            usedArgs = candidateArgs[0];
+        }
+
+        var output = picked.Value.Output;
+        var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        const string commonPattern = "(?:\\\\\\.\\)?(?:HDIMAGE|REGISTRY)\\[^\\s\"']+";
+
+        var shortList = new List<string>();
+        var uniqueList = new List<string>();
+
+        foreach (var line in lines)
+        {
+            var parts = line.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            foreach (var part in parts)
+            {
+                foreach (Match match in Regex.Matches(part, commonPattern, RegexOptions.IgnoreCase))
+                {
+                    var value = NormalizeFqcn(match.Value);
+                    if (value.IndexOf("\\HDIMAGE\\HDIMAGE\\", StringComparison.OrdinalIgnoreCase) >= 0
+                        || value.IndexOf("\\REGISTRY\\REGISTRY\\", StringComparison.OrdinalIgnoreCase) >= 0
+                        || Regex.IsMatch(value, @"\\[0-9A-F]{4,}$", RegexOptions.IgnoreCase))
+                    {
+                        uniqueList.Add(value);
+                    }
+                    else
+                    {
+                        shortList.Add(value);
+                    }
+                }
+            }
+        }
+
+        var shortDistinct = shortList.Where(v => !string.IsNullOrWhiteSpace(v)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var uniqueDistinct = uniqueList.Where(v => !string.IsNullOrWhiteSpace(v)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        return new ContainerEnumerationResult(shortDistinct, uniqueDistinct, usedArgs, output);
+    }
+
+    private static string NormalizeFqcn(string value)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.StartsWith("\\\\.\\", StringComparison.Ordinal))
+            return trimmed;
+        if (trimmed.StartsWith("HDIMAGE\\", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("REGISTRY\\", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"\\\\.\\{trimmed}";
+        }
+
+        return trimmed;
     }
 
     private static string Mask(string text, IEnumerable<string>? secrets)
@@ -166,3 +225,4 @@ public sealed class CryptoProCliService
 }
 
 public readonly record struct ProcessResult(int ExitCode, string Output);
+public readonly record struct ContainerEnumerationResult(string[] ContainersShort, string[] ContainersUnique, string UsedArgs, string RawOutput);
