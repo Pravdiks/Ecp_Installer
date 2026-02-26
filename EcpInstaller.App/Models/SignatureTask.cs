@@ -7,6 +7,7 @@ public sealed class SignatureTask : INotifyPropertyChanged
 {
     private SignatureTaskStatus _status = SignatureTaskStatus.Pending;
     private string _message = "Ожидает установки";
+    private bool? _hasPrivateKey;
 
     public SignatureSourceKind Kind { get; init; }
 
@@ -28,14 +29,29 @@ public sealed class SignatureTask : INotifyPropertyChanged
         }
     }
 
-    public string StatusLabel => Status switch
+    /// <summary>
+    /// null = not yet checked; true = private key linked; false = no key linked (warning).
+    /// </summary>
+    public bool? HasPrivateKey
     {
-        SignatureTaskStatus.Pending => "Ожидает установки",
-        SignatureTaskStatus.Running => "Установка...",
-        SignatureTaskStatus.Success => "Установлено",
-        SignatureTaskStatus.Error => "Ошибка",
-        SignatureTaskStatus.Skipped => "Пропущено",
-        _ => Status.ToString()
+        get => _hasPrivateKey;
+        set
+        {
+            _hasPrivateKey = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(StatusLabel));
+        }
+    }
+
+    public string StatusLabel => (Status, HasPrivateKey) switch
+    {
+        (SignatureTaskStatus.Success, false) => "⚠ Ключ не привязан",
+        (SignatureTaskStatus.Pending, _)     => "Ожидает установки",
+        (SignatureTaskStatus.Running, _)     => "Установка...",
+        (SignatureTaskStatus.Success, _)     => "Установлено",
+        (SignatureTaskStatus.Error,   _)     => "Ошибка",
+        (SignatureTaskStatus.Skipped, _)     => "Пропущено",
+        _                                    => Status.ToString()
     };
 
     /// <summary>

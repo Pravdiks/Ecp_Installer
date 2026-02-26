@@ -135,30 +135,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         var containerLocation = RegistryOption.IsChecked == true ? ContainerLocation.Registry : ContainerLocation.Disk;
 
-        // Disk (HDIMAGE) mode requires admin to register the reader in HKLM.
-        if (containerLocation == ContainerLocation.Disk && !Helpers.WindowsPrincipalHelper.IsAdministrator())
-        {
-            var switchResult = System.Windows.MessageBox.Show(
-                "Режим 'Диск' требует прав администратора для регистрации считывателя HDIMAGE.\n\n" +
-                "Переключиться на режим 'Реестр (CurrentUser)'? Он не требует админ-прав.",
-                "Требуются права администратора",
-                MessageBoxButton.YesNoCancel,
-                MessageBoxImage.Warning);
-
-            if (switchResult == MessageBoxResult.Yes)
-            {
-                RegistryOption.IsChecked = true;
-                containerLocation = ContainerLocation.Registry;
-                _logger.Warn("Автопереключение на режим Реестр — нет прав администратора.");
-            }
-            else if (switchResult == MessageBoxResult.Cancel)
-            {
-                _logger.Warn("Установка отменена пользователем.");
-                return;
-            }
-            // No = try anyway (reader might already be registered).
-        }
-
         var password = PasswordBox.Text;
         var containerFolder = ContainerFolderBox.Text;
 
