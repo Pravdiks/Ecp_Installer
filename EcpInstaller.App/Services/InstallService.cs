@@ -101,23 +101,22 @@ public sealed class InstallService
         var sourceContainer = task.ContainerPath!;
 
         // ═══════════════════════════════════════════════════════════
-        // ШАГ 1: Определяем папку реестра КриптоПро.
-        // Читаем из HKCU\Software\Crypto Pro\Settings\KeysDirectory,
-        // чтобы получить реальный путь, а не захардкоженный.
+        // ШАГ 1: Определяем папку реестра КриптоПро (из реестра Windows).
         // ═══════════════════════════════════════════════════════════
         var keysRoot = GetCryptoProKeysFolder();
 
         // ═══════════════════════════════════════════════════════════
-        // ШАГ 2: ВСЕГДА копируем контейнер в РЕЕСТР КриптоПро.
-        // Только \\.\REGISTRY\... принимает -pin без GUI диалога.
-        // HDIMAGE и FAT12 считыватели полностью игнорируют -pin.
+        // ШАГ 2: Импортируем контейнер в реестр КриптоПро.
+        // Простое копирование папки недостаточно для CSP 5 — нужна
+        // регистрация через csptest или запись метаданных в реестр.
+        // Три стратегии с автоматическим fallback.
         // ═══════════════════════════════════════════════════════════
-        var (contUncPath, regName) = await CopyContainerToRegistryAsync(sourceContainer, keysRoot);
+        var (contUncPath, regName) = await ImportContainerToRegistryAsync(
+            task, certMgr, keysRoot);
 
         // ═══════════════════════════════════════════════════════════
         // ШАГ 3: Режим "Диск" — дополнительно копируем контейнер
-        // в указанную папку (для хранения). Не критично для установки
-        // — certmgr всё равно использует реестровую копию.
+        // в указанную папку (для хранения). Не критично для установки.
         // ═══════════════════════════════════════════════════════════
         if (containerLocation == ContainerLocation.Disk)
         {
@@ -152,7 +151,6 @@ public sealed class InstallService
 
         // ═══════════════════════════════════════════════════════════
         // ШАГ 4: Проверяем что КриптоПро видит контейнер (csptest).
-        // Если csptest не видит — certmgr тоже не увидит.
         // ═══════════════════════════════════════════════════════════
         await VerifyContainerVisibleAsync(certMgr, contUncPath);
 
@@ -162,8 +160,7 @@ public sealed class InstallService
         LogContainerState(Path.Combine(keysRoot, regName), contUncPath);
 
         // ═══════════════════════════════════════════════════════════
-        // ШАГ 6: certmgr с реестровым UNC-путём. -pin гарантированно
-        // принимается без GUI диалога для \\.\REGISTRY\...
+        // ШАГ 6: certmgr с реестровым UNC-путём.
         // ═══════════════════════════════════════════════════════════
         int lastExitCode = -1;
         string? lastOutput = null;
@@ -179,8 +176,6 @@ public sealed class InstallService
         // ═══════════════════════════════════════════════════════════
         // ШАГ 7: Fallback — установка без -cont если все попытки
         // с реестровым UNC-путём провалились.
-        // .cer кладётся рядом с папкой контейнера в keysRoot,
-        // КриптоПро сам находит контейнер по соседству.
         // ═══════════════════════════════════════════════════════════
         if (lastExitCode != 0)
         {
@@ -203,7 +198,9 @@ public sealed class InstallService
         RemoveOldCertificatesExcept(store, new X509Certificate2(task.CertificatePath));
 
         // ═══════════════════════════════════════════════════════════
-        // ШАГ 8: Проверка привязки закрытого ключа + repairstore.
+        // ШАГ 8: Проверка привязки закрытого ключа.
+        // Сначала ждём 2 сек, проверяем без repairstore.
+        // Если не привязан — repairstore с таймаутом 8 сек.
         // ═══════════════════════════════════════════════════════════
         await VerifyAndRepairPrivateKeyAsync(task, storeLocation);
     }
@@ -246,72 +243,211 @@ public sealed class InstallService
     }
 
     // ──────────────────────────────────────────────────────────────
-    //  Registry container placement
+    //  Container import into CryptoPro registry
     // ──────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Copies the container folder to <c>{keysRoot}\{name}\</c>
-    /// where <c>{name}</c> is the raw folder name with its numeric extension stripped
-    /// (e.g. <c>rwowmbby.001</c> → <c>rwowmbby</c>).
-    /// Copies ALL files (no extension filter), strips ReadOnly attributes,
-    /// logs each file with its size, verifies critical key files,
-    /// then waits 1 500 ms for CryptoPro to index the new container.
+    /// Imports the container into the CryptoPro registry provider using three strategies:
+    /// <list type="number">
+    ///   <item>csptest -newkeyset (creates a registered keyset, then fills with key files)</item>
+    ///   <item>file copy + Windows registry metadata write</item>
+    ///   <item>plain file copy fallback (certmgr without -cont may still succeed)</item>
+    /// </list>
     /// Returns <c>(\\.\REGISTRY\{name}, {name})</c>.
     /// </summary>
-    private async Task<(string UncPath, string RegName)> CopyContainerToRegistryAsync(
-        string sourceContainerPath, string keysRoot)
+    private async Task<(string UncPath, string RegName)> ImportContainerToRegistryAsync(
+        SignatureTask task, string certMgrPath, string keysRoot)
     {
-        Directory.CreateDirectory(keysRoot);
-
+        var sourceContainerPath = task.ContainerPath!;
         var rawName = Path.GetFileName(
             sourceContainerPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
 
-        // Strip .NNN numeric extension (e.g. "rwowmbby.001" → "rwowmbby").
-        // Only strip when the extension consists entirely of digits.
         var ext     = Path.GetExtension(rawName);
         var regName = ext.Length > 1 && ext[1..].All(char.IsDigit)
             ? Path.GetFileNameWithoutExtension(rawName)
             : rawName;
 
-        var destFolder = Path.Combine(keysRoot, regName);
+        var contUncPath = $@"\\.\REGISTRY\{regName}";
+        _logger.Info($"Импорт контейнера: {sourceContainerPath} → {contUncPath}");
 
-        // Recreate destination to ensure a clean copy.
-        if (Directory.Exists(destFolder))
-            Directory.Delete(destFolder, recursive: true);
-        Directory.CreateDirectory(destFolder);
+        var cspTestPath = Path.Combine(Path.GetDirectoryName(certMgrPath)!, "csptest.exe");
 
-        _logger.Info($"Копирование контейнера в реестр: {sourceContainerPath} → {destFolder}");
-
-        // Copy ALL files — no extension filter.
-        // Strip ReadOnly so CryptoPro can open them.
-        await Task.Run(() =>
+        // ── Стратегия 1: csptest -newkeyset ─────────────────────
+        // csptest создаёт зарегистрированный набор ключей,
+        // затем заполняем папку реальными файлами ключей.
+        if (File.Exists(cspTestPath))
         {
-            foreach (var file in Directory.EnumerateFiles(sourceContainerPath))
+            var imported = await TryImportViaCspTestAsync(
+                cspTestPath, sourceContainerPath, contUncPath, regName, keysRoot);
+            if (imported)
             {
-                var destFile = Path.Combine(destFolder, Path.GetFileName(file));
-                File.Copy(file, destFile, overwrite: true);
-                File.SetAttributes(destFile, FileAttributes.Normal);
-                var size = new FileInfo(destFile).Length;
-                _logger.Info($"  Скопирован: {Path.GetFileName(destFile)} ({size} байт)");
+                _logger.Info($"Стратегия 1 (csptest) успешна: {contUncPath}");
+                return (contUncPath, regName);
             }
-        });
-
-        // Verify that the most critical key files are present.
-        foreach (var req in new[] { "primary.key", "header.key", "masks.key" })
+            _logger.Warn("Стратегия 1 (csptest) не удалась. Переход к стратегии 2.");
+        }
+        else
         {
-            var reqPath = Path.Combine(destFolder, req);
-            if (!File.Exists(reqPath))
-                _logger.Warn($"  ВНИМАНИЕ: ожидаемый файл отсутствует: {req}");
-            else
-                _logger.Info($"  Файл OK: {req} ({new FileInfo(reqPath).Length} байт)");
+            _logger.Warn("csptest.exe не найден. Пропускаем стратегию 1.");
         }
 
-        // Give CryptoPro's provider time to index the new container.
-        await Task.Delay(1500);
+        // ── Стратегия 2: копирование файлов + реестр Windows ────
+        // Пишем метаданные в HKCU\Software\Crypto Pro\Settings\...
+        // так КриптоПро может найти контейнер по папке.
+        var registered = await TryCopyAndRegisterContainerAsync(
+            sourceContainerPath, regName, contUncPath, keysRoot, cspTestPath);
+        if (registered)
+        {
+            _logger.Info($"Стратегия 2 (копирование + реестр) успешна: {contUncPath}");
+            return (contUncPath, regName);
+        }
+        _logger.Warn("Стратегия 2 не удалась. Переход к стратегии 3 (fallback).");
 
-        var uncPath = $@"\\.\REGISTRY\{regName}";
-        _logger.Info($"UNC: {uncPath}");
-        return (uncPath, regName);
+        // ── Стратегия 3: fallback ─────────────────────────────────
+        // Файлы уже скопированы стратегией 2.
+        // certmgr без -cont (TryInstallWithoutContAsync) может всё равно
+        // установить сертификат — как это работает для Ананьевой.
+        _logger.Warn("Контейнер не зарегистрирован через csptest/реестр. " +
+            "Файлы в keysRoot скопированы — certmgr fallback попробует без -cont.");
+        return (contUncPath, regName);
+    }
+
+    // ── Стратегия 1: csptest -newkeyset ──────────────────────────
+
+    private async Task<bool> TryImportViaCspTestAsync(
+        string cspTestPath, string sourceContainerPath,
+        string destContUncPath, string regName, string keysRoot)
+    {
+        // Удалить существующий набор ключей (игнорируем ошибку если нет).
+        await RunProcessGetCodeAsync(cspTestPath,
+            $@"-keyset -cont ""{destContUncPath}"" -deletekeyset -silent");
+
+        // Вариант А: -src — некоторые версии csptest поддерживают копирование через -src.
+        // Вариант Б: -newkeyset — создаёт пустой зарегистрированный набор, затем
+        //            заполняем его key-файлами вручную.
+        string[] importArgs =
+        [
+            $@"-keyset -newkeyset -cont ""{destContUncPath}"" -src ""{sourceContainerPath}"" -provtype 80",
+            $@"-keyset -newkeyset -cont ""{destContUncPath}"" -provtype 80",
+        ];
+
+        foreach (var args in importArgs)
+        {
+            _logger.Info($"csptest import: {args}");
+            var exitCode = await RunProcessGetCodeAsync(cspTestPath, args);
+
+            if (exitCode == 0)
+            {
+                // Проверить что контейнер теперь виден.
+                var verifyCode = await RunProcessGetCodeAsync(cspTestPath,
+                    $@"-keyset -cont ""{destContUncPath}"" -info");
+                _logger.Info($"csptest verify после newkeyset: exitCode={verifyCode}");
+
+                if (verifyCode == 0)
+                {
+                    // Папка создана csptest — заполняем реальными файлами ключей.
+                    var destFolder = Path.Combine(keysRoot, regName);
+                    if (Directory.Exists(destFolder))
+                    {
+                        foreach (var f in Directory.EnumerateFiles(sourceContainerPath))
+                        {
+                            var dest = Path.Combine(destFolder, Path.GetFileName(f));
+                            File.Copy(f, dest, overwrite: true);
+                            File.SetAttributes(dest, FileAttributes.Normal);
+                            _logger.Info($"  Ключ скопирован: {Path.GetFileName(dest)} ({new FileInfo(dest).Length} байт)");
+                        }
+                        _logger.Info("Ключи скопированы в созданный контейнер.");
+                    }
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // ── Стратегия 2: копирование файлов + запись в реестр Windows ─
+
+    private async Task<bool> TryCopyAndRegisterContainerAsync(
+        string sourceContainerPath, string regName, string contUncPath,
+        string keysRoot, string cspTestPath)
+    {
+        try
+        {
+            var destFolder = Path.Combine(keysRoot, regName);
+            if (Directory.Exists(destFolder))
+                Directory.Delete(destFolder, recursive: true);
+            Directory.CreateDirectory(destFolder);
+
+            _logger.Info($"Копирование контейнера: {sourceContainerPath} → {destFolder}");
+            foreach (var f in Directory.EnumerateFiles(sourceContainerPath))
+            {
+                var dest = Path.Combine(destFolder, Path.GetFileName(f));
+                File.Copy(f, dest, overwrite: true);
+                File.SetAttributes(dest, FileAttributes.Normal);
+                _logger.Info($"  Скопирован: {Path.GetFileName(dest)} ({new FileInfo(dest).Length} байт)");
+            }
+
+            // Проверить наличие критичных файлов.
+            foreach (var req in new[] { "primary.key", "header.key", "masks.key" })
+            {
+                var reqPath = Path.Combine(destFolder, req);
+                if (!File.Exists(reqPath))
+                    _logger.Warn($"  ВНИМАНИЕ: файл отсутствует: {req}");
+                else
+                    _logger.Info($"  Файл OK: {req} ({new FileInfo(reqPath).Length} байт)");
+            }
+
+            // Записать метаданные в реестр КриптоПро.
+            RegisterContainerInRegistry(regName, destFolder);
+
+            await Task.Delay(1500);
+
+            // Проверить видимость через csptest.
+            if (File.Exists(cspTestPath))
+            {
+                var code = await RunProcessGetCodeAsync(cspTestPath,
+                    $@"-keyset -cont ""{contUncPath}"" -info");
+                _logger.Info($"После копирования + реестр: csptest code={code}");
+                return code == 0;
+            }
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"TryCopyAndRegisterContainer ошибка: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Writes container metadata into Windows registry paths used by CryptoPro 5
+    /// so the provider can locate the container folder.
+    /// </summary>
+    private void RegisterContainerInRegistry(string containerName, string folderPath)
+    {
+        string[] regPaths =
+        [
+            $@"Software\Crypto Pro\Settings\Users\{containerName}",
+            $@"Software\Crypto Pro\Settings\Keys\{containerName}",
+        ];
+
+        foreach (var regPath in regPaths)
+        {
+            try
+            {
+                using var key = Registry.CurrentUser.CreateSubKey(regPath);
+                if (key != null)
+                {
+                    key.SetValue("Path", folderPath);
+                    key.SetValue("Name", containerName);
+                    _logger.Info($"Реестр записан: HKCU\\{regPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"Не удалось записать реестр {regPath}: {ex.Message}");
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -320,8 +456,7 @@ public sealed class InstallService
 
     /// <summary>
     /// Runs <c>csptest -keyset -cont "{contUncPath}" -info</c> and logs whether
-    /// CryptoPro can see the container. A non-zero exit code means certmgr
-    /// will also fail. Errors are logged but never propagated.
+    /// CryptoPro can see the container. Errors are logged but never propagated.
     /// </summary>
     private async Task VerifyContainerVisibleAsync(string certMgrPath, string contUncPath)
     {
@@ -367,11 +502,6 @@ public sealed class InstallService
     //  Container folder helpers (disk mode)
     // ──────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Creates <paramref name="requestedFolder"/> and returns it.
-    /// Falls back to <c>%APPDATA%\EcpInstaller\Containers</c> if the drive
-    /// is unavailable or the directory cannot be created.
-    /// </summary>
     private string EnsureContainerFolder(string requestedFolder)
     {
         try
@@ -407,29 +537,46 @@ public sealed class InstallService
     // ──────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Checks whether the installed certificate has a linked private key.
-    /// If not, attempts <c>certutil -repairstore</c> once and re-checks.
-    /// Always sets <see cref="SignatureTask.HasPrivateKey"/>.
+    /// <para>Verifies that the installed certificate has a linked private key.</para>
+    /// <para>
+    /// Waits 2 seconds first (CryptoPro needs time to finalize key binding),
+    /// then checks <see cref="X509Certificate2.HasPrivateKey"/> without running
+    /// repairstore. Only if still unlinked does it invoke <c>certutil -repairstore</c>
+    /// with an 8-second timeout to avoid blocking on a smart-card PIN dialog.
+    /// </para>
     /// </summary>
     private async Task VerifyAndRepairPrivateKeyAsync(SignatureTask task, StoreLocation storeLocation)
     {
         var thumbprint = GetCertThumbprint(task.CertificatePath);
         _logger.Info($"Thumbprint: {thumbprint}");
 
-        await Task.Delay(500); // brief pause for CryptoPro to finalize the key mapping
+        // Longer initial pause — let CryptoPro finalize key binding before checking.
+        await Task.Delay(2000);
 
         var hasKey = CheckPrivateKeyLinked(thumbprint, storeLocation);
-        _logger.Info($"HasPrivateKey после установки: {hasKey}");
+        _logger.Info($"HasPrivateKey (без repairstore): {hasKey}");
 
         if (!hasKey)
         {
-            _logger.Info("Попытка привязки ключа через certutil -repairstore...");
+            // certutil -repairstore may trigger a smart-card PIN dialog if a card reader
+            // is present. Cap it at 8 seconds so the UI never blocks indefinitely.
+            _logger.Info("Попытка привязки ключа через certutil -repairstore (таймаут 8 сек)...");
             var userFlag = storeLocation == StoreLocation.CurrentUser ? "-user " : string.Empty;
-            var (repairCode, repairOut) = await RunSystemCommandAsync(
-                "certutil.exe", $"-repairstore {userFlag}My \"{thumbprint}\"");
-            _logger.Info($"certutil -repairstore код {repairCode}. Вывод:\n{repairOut}");
 
-            await Task.Delay(300);
+            var repairTask = RunSystemCommandAsync(
+                "certutil.exe", $"-repairstore {userFlag}My \"{thumbprint}\"");
+
+            if (await Task.WhenAny(repairTask, Task.Delay(8_000)) == repairTask)
+            {
+                var (repairCode, repairOut) = await repairTask;
+                _logger.Info($"certutil -repairstore код {repairCode}. Вывод:\n{repairOut}");
+            }
+            else
+            {
+                _logger.Warn("certutil -repairstore таймаут 8 сек — пропускаем.");
+            }
+
+            await Task.Delay(500);
             hasKey = CheckPrivateKeyLinked(thumbprint, storeLocation);
             _logger.Info($"HasPrivateKey после repairstore: {hasKey}");
         }
@@ -468,9 +615,6 @@ public sealed class InstallService
     //  certmgr invocations
     // ──────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Runs <c>certmgr -inst … -cont "{contUncPath}"</c> and returns the exit code + output.
-    /// </summary>
     private async Task<(int ExitCode, string Output)> RunCertMgrInstallAsync(
         string certMgr, string cerPath, string contUncPath,
         string password, string locationArg, int provType)
@@ -489,9 +633,8 @@ public sealed class InstallService
 
     /// <summary>
     /// Fallback: places the <c>.cer</c> file directly inside <paramref name="keysRoot"/>
-    /// (where the container subfolder already lives) and runs certmgr <b>without</b>
-    /// <c>-cont</c>. CryptoPro auto-discovers the container from the same directory.
-    /// The temporary <c>.cer</c> copy is deleted in a <c>finally</c> block.
+    /// and runs certmgr <b>without</b> <c>-cont</c> so CryptoPro auto-discovers
+    /// the container subfolder. Temp <c>.cer</c> is deleted in a <c>finally</c> block.
     /// </summary>
     private async Task<bool> TryInstallWithoutContAsync(
         string certMgr, string locationArg, string cerPath,
@@ -549,8 +692,44 @@ public sealed class InstallService
         }
     }
 
-    /// <summary>Runs an arbitrary system executable (e.g. certutil.exe) and captures stdout + stderr.</summary>
-    private static async Task<(int ExitCode, string Output)> RunSystemCommandAsync(string exe, string arguments)
+    /// <summary>
+    /// Runs <paramref name="exe"/> with <paramref name="args"/> and returns the exit code.
+    /// Output is logged at Info level. Process is killed if it exceeds
+    /// <paramref name="timeoutMs"/> (default 10 s); returns -1 on timeout.
+    /// </summary>
+    private async Task<int> RunProcessGetCodeAsync(
+        string exe, string args, int timeoutMs = 10_000)
+    {
+        var psi = new ProcessStartInfo(exe, args)
+        {
+            UseShellExecute        = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+            CreateNoWindow         = true,
+        };
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException($"Не удалось запустить: {exe}");
+
+        var outTask = proc.StandardOutput.ReadToEndAsync();
+        var errTask = proc.StandardError.ReadToEndAsync();
+        var finished = await Task.Run(() => proc.WaitForExit(timeoutMs));
+
+        if (!finished)
+        {
+            try { proc.Kill(); } catch { }
+            _logger.Warn($"Process timeout ({timeoutMs} ms): {Path.GetFileName(exe)}");
+            return -1;
+        }
+
+        var output = (await outTask) + (await errTask);
+        if (!string.IsNullOrWhiteSpace(output))
+            _logger.Info($"{Path.GetFileName(exe)}: {output.Trim()}");
+        return proc.ExitCode;
+    }
+
+    /// <summary>Runs an arbitrary system executable and captures stdout + stderr.</summary>
+    private static async Task<(int ExitCode, string Output)> RunSystemCommandAsync(
+        string exe, string arguments)
     {
         var psi = new ProcessStartInfo(exe, arguments)
         {
@@ -585,7 +764,7 @@ public sealed class InstallService
         foreach (var old in oldOnes)
         {
             store.Remove(old);
-            _logger.Info($"Удален старый сертификат: Subject={old.Subject}; Serial={old.SerialNumber}. Причина: найдено совпадение владельца.");
+            _logger.Info($"Удален старый сертификат: Subject={old.Subject}; Serial={old.SerialNumber}.");
         }
     }
 
