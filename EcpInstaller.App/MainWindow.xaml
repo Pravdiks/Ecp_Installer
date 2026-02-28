@@ -1,0 +1,265 @@
+<Window x:Class="EcpInstaller.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:helpers="clr-namespace:EcpInstaller.App.Helpers"
+        mc:Ignorable="d"
+        Title="ECP Installer (portable)" Height="780" Width="1120"
+        Topmost="True"
+        AllowDrop="True"
+        Loaded="Window_Loaded"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        DragEnter="Window_DragEnter"
+        DragOver="Window_DragOver"
+        DragLeave="Window_DragLeave"
+        Drop="Window_Drop">
+    <Window.CommandBindings>
+        <CommandBinding Command="ApplicationCommands.Paste"
+                        Executed="PasteCommand_Executed"
+                        CanExecute="PasteCommand_CanExecute" />
+    </Window.CommandBindings>
+    <Window.Resources>
+        <helpers:GroupExpandedConverter x:Key="GroupExpandedConverter" />
+
+        <Style x:Key="GreenButtonStyle" TargetType="Button">
+            <Setter Property="Background"   Value="#4C9900"/>
+            <Setter Property="Foreground"   Value="White"/>
+            <Setter Property="FontWeight"   Value="Bold"/>
+            <Setter Property="BorderBrush"  Value="#3C7800"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding"      Value="4,2"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="2"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#5AAF00"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#3C7800"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.55"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="StatusTextStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="DimGray" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Status}" Value="Success">
+                    <Setter Property="Foreground" Value="ForestGreen" />
+                    <Setter Property="FontWeight" Value="SemiBold" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Status}" Value="Error">
+                    <Setter Property="Foreground" Value="Crimson" />
+                    <Setter Property="FontWeight" Value="SemiBold" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Status}" Value="Skipped">
+                    <Setter Property="Foreground" Value="DarkOrange" />
+                </DataTrigger>
+                <!-- Warning: installed but private key not linked -->
+                <DataTrigger Binding="{Binding HasPrivateKey}" Value="False">
+                    <Setter Property="Foreground" Value="Goldenrod" />
+                    <Setter Property="FontWeight" Value="Bold" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="12" Background="Transparent" PreviewMouseLeftButtonDown="WindowSurface_PreviewMouseLeftButtonDown">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="220" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border x:Name="PasteZone"
+                BorderBrush="#7A2E7D32"
+                BorderThickness="1"
+                CornerRadius="4"
+                Background="#142E7D32"
+                Padding="8"
+                Margin="0,0,0,8"
+                Focusable="True"
+                MouseLeftButtonDown="PasteZone_MouseLeftButtonDown">
+            <TextBlock Text="Кликните сюда и нажмите Ctrl+V, чтобы вставить пути из буфера"
+                       FontWeight="SemiBold"
+                       Foreground="#1B5E20" />
+        </Border>
+
+        <Border Grid.Row="1" BorderBrush="#AAA" BorderThickness="1" Padding="10" Margin="0,0,0,8">
+            <StackPanel>
+                <TextBlock Text="Перетащите файлы/папки с ЭЦП, либо выберите через кнопку." FontWeight="SemiBold" />
+                <WrapPanel Margin="0,8,0,0">
+                    <Button Content="Выбрать папку/файлы" Width="180" Margin="0,0,8,0" Click="PickInput_Click" />
+                    <Button Content="Сканировать" Width="120" Margin="0,0,8,0" Click="Scan_Click" />
+                    <Button Content="Установить всё" Width="120" Margin="0,0,8,0" Click="InstallAll_Click"
+                            Style="{StaticResource GreenButtonStyle}" />
+                    <Button Content="Очистить список" Width="140" Margin="0,0,8,0" Click="Clear_Click" />
+                    <Button Content="Открыть лог" Width="120" Margin="0,0,8,0" Click="OpenLog_Click" />
+                    <Button Content="Сертификаты" Width="120" Margin="0,0,8,0" Click="OpenCertificates_Click" />
+                    <Button Content="Посмотреть установленное" Width="190" Margin="0,0,8,0" Click="ViewInstalled_Click" />
+                </WrapPanel>
+            </StackPanel>
+        </Border>
+
+        <Grid Grid.Row="2" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                <Border Background="#E8F5E9" Padding="6" CornerRadius="3" BorderBrush="#A5D6A7" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="Пароль контейнера/PFX:" Foreground="#2E7D32" FontWeight="SemiBold" />
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBox x:Name="PasswordBox"
+                                     Width="150"
+                                     TextChanged="SettingsControl_Changed"
+                                     Background="#F1F8E9" />
+                            <Button x:Name="UsePasswordButton"
+                                    Content="Использовать пароль"
+                                    Margin="8,0,0,0"
+                                    Padding="8,2"
+                                    Click="UsePasswordButton_Click"
+                                    Background="#FFF3E0"
+                                    Foreground="#BF360C" />
+                        </StackPanel>
+                        <TextBlock Text="Нажмите «Использовать пароль», чтобы этот PIN использовался для окон КриптоПро."
+                                   Margin="0,4,0,0"
+                                   Foreground="Gray"
+                                   FontSize="11"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <TextBlock Margin="0,8,0,0" Text="Хранилище сертификатов:" />
+                <ComboBox x:Name="StoreCombo" SelectedIndex="0" SelectionChanged="SettingsControl_Changed">
+                    <ComboBoxItem Content="CurrentUser (без админа)" Tag="CurrentUser" />
+                    <ComboBoxItem Content="LocalMachine (нужен админ)" Tag="LocalMachine" />
+                </ComboBox>
+
+                <CheckBox x:Name="MostActualCheck" IsChecked="True" Content="Ставить только самый актуальный сертификат владельца (по NotAfter)" Margin="0,8,0,0" Checked="SettingsControl_Changed" Unchecked="SettingsControl_Changed" />
+                <CheckBox x:Name="TopMostCheck" IsChecked="True" Content="Окно поверх всех" Margin="0,8,0,0" Checked="TopMostCheck_Changed" Unchecked="TopMostCheck_Changed" />
+            </StackPanel>
+
+            <StackPanel Grid.Column="1">
+                <DockPanel LastChildFill="False">
+                    <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
+                        <TextBlock Text="Хранить контейнер:" VerticalAlignment="Center" />
+                        <RadioButton x:Name="DiskOption" Content="Диск" IsChecked="True" Margin="8,0,12,0" Checked="ContainerOption_Changed" />
+                        <RadioButton x:Name="RegistryOption" Content="Реестр (CurrentUser)" Checked="ContainerOption_Changed" />
+                    </StackPanel>
+                    <Button Content="Реестр контейнеров"
+                            Margin="12,0,0,0"
+                            Padding="6,2"
+                            Click="OpenRegistryContainers_Click" />
+                </DockPanel>
+
+                <TextBlock Margin="0,8,0,0" Text="Папка для контейнеров на диске:" />
+                <DockPanel>
+                    <TextBox x:Name="ContainerFolderBox" MinWidth="260" TextChanged="SettingsControl_Changed" />
+                    <Button Content="..." Width="32" Margin="8,0,0,0" Click="PickContainerFolder_Click" />
+                </DockPanel>
+                <TextBlock x:Name="WarningText" Foreground="DarkOrange" TextWrapping="Wrap" />
+                <TextBlock Foreground="Gray" Text="Режим 'Реестр (CurrentUser)' не требует админ-прав." Margin="0,6,0,0" />
+            </StackPanel>
+        </Grid>
+
+        <DataGrid x:Name="TasksDataGrid" Grid.Row="3" ItemsSource="{Binding Tasks}" AutoGenerateColumns="False" IsReadOnly="True" Margin="0,0,0,8"
+                  MouseDoubleClick="DataGrid_MouseDoubleClick" SelectionChanged="DataGrid_SelectionChanged">
+            <DataGrid.GroupStyle>
+                <GroupStyle>
+                    <GroupStyle.ContainerStyle>
+                        <Style TargetType="{x:Type GroupItem}">
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="{x:Type GroupItem}">
+                                        <Expander IsExpanded="{Binding Name,
+                                                    Converter={StaticResource GroupExpandedConverter},
+                                                    Mode=OneTime}"
+                                                  BorderThickness="0" Margin="0,2,0,0">
+                                            <Expander.Header>
+                                                <TextBlock FontWeight="SemiBold" Foreground="DarkOrange" Margin="4,2">
+                                                    <Run Text="{Binding Name, Mode=OneWay}"/>
+                                                    <Run Text=": "/>
+                                                    <Run Text="{Binding ItemCount, Mode=OneWay}"/>
+                                                    <Run Text=" записей"/>
+                                                </TextBlock>
+                                            </Expander.Header>
+                                            <ItemsPresenter />
+                                        </Expander>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </GroupStyle.ContainerStyle>
+                </GroupStyle>
+            </DataGrid.GroupStyle>
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Название"    Binding="{Binding DisplayName}"   Width="2*" MinWidth="120" />
+                <DataGridTextColumn Header="Тип"         Binding="{Binding Kind}"          Width="70" MinWidth="55"  />
+                <DataGridTextColumn Header="Сертификат"  Binding="{Binding CertificatePath}" Width="3*" MinWidth="190" />
+                <DataGridTextColumn Header="Контейнер"   Binding="{Binding ContainerPath}" Width="3*" MinWidth="130" />
+                <DataGridTextColumn Header="Статус"      Binding="{Binding StatusLabel}"   Width="130" MinWidth="95">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource StatusTextStyle}" />
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+                <DataGridTextColumn Header="Сообщение"   Binding="{Binding Message}"       Width="2*" MinWidth="220" />
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <Grid Grid.Row="4">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <ProgressBar x:Name="Progress" Height="20" Minimum="0" Maximum="100" />
+            <ListBox x:Name="LogsListBox" Grid.Row="1" ItemsSource="{Binding Logs}" Margin="0,8,0,0" PreviewMouseLeftButtonDown="LogsListBox_PreviewMouseLeftButtonDown" />
+        </Grid>
+
+        <StatusBar Grid.Row="5" Margin="0,8,0,0">
+            <StatusBarItem>
+                <TextBlock Text="by Pravdiks" Foreground="#2E7D32" FontWeight="SemiBold" />
+            </StatusBarItem>
+            <StatusBarItem>
+                <TextBlock Cursor="Hand" ToolTip="Открыть Telegram" Foreground="#2E7D32">
+                    <Hyperlink Click="TelegramLink_Click">t.me/Pravdiks ↗</Hyperlink>
+                </TextBlock>
+            </StatusBarItem>
+        </StatusBar>
+
+        <Border x:Name="DropOverlay"
+                Background="#6602A14B"
+                BorderBrush="#AA02A14B"
+                BorderThickness="2"
+                CornerRadius="6"
+                Visibility="Collapsed"
+                Grid.RowSpan="6"
+                Panel.ZIndex="10">
+            <TextBlock Text="Кидай сюда файлы и папки с ЭЦП"
+                       Foreground="White"
+                       FontSize="24"
+                       FontWeight="Bold"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center" />
+        </Border>
+    </Grid>
+</Window>
